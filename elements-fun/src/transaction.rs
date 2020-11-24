@@ -17,24 +17,25 @@
 
 use crate::{
     confidential::{
-        AssetBlindingFactor, AssetCommitment, Nonce, ValueBlindingFactor, ValueCommitment,
+        AssetBlindingFactor, AssetGenerator, Nonce, ValueBlindingFactor, ValueCommitment,
     },
     encode::{self, Decodable, Encodable, Error},
     issuance::AssetId,
     opcodes,
     script::Instruction,
-    wally::{asset_rangeproof, asset_surjectionproof, asset_unblind},
     Address, Script, Txid, Wtxid,
 };
 use bitcoin::{
     self,
     hashes::Hash,
     secp256k1::{
+        ecdh::SharedSecret,
         rand::{CryptoRng, RngCore},
-        PublicKey, Secp256k1, SecretKey, Signing,
+        RangeProof, Secp256k1, SecretKey, Signing, Verification,
     },
     VarInt,
 };
+use bitcoin_hashes::sha256d;
 use std::{collections::HashMap, fmt, io};
 
 /// Elements transaction
@@ -120,9 +121,8 @@ impl OutPoint {
     }
 }
 
-// TODO: Is `Default` really useful here?
 /// Description of an asset issuance in a transaction input
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
@@ -176,7 +176,7 @@ pub struct ExplicitTxOut {
 )]
 pub struct ConfidentialTxOut {
     /// Committed asset
-    pub asset: AssetCommitment,
+    pub asset: AssetGenerator,
     /// Committed amount
     pub value: ValueCommitment,
     /// Nonce (ECDH key passed to recipient)
@@ -218,7 +218,7 @@ pub struct ExplicitAssetIssuance {
     pub inflation_keys: ExplicitValue,
 }
 
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
@@ -265,7 +265,7 @@ pub struct ExplicitAsset(pub AssetId);
 pub struct ExplicitValue(pub u64);
 
 /// Transaction output witness
-#[derive(Clone, Default, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
@@ -275,7 +275,7 @@ pub struct TxOutWitness {
     /// Surjection proof showing that the asset commitment is legitimate
     pub surjection_proof: Vec<u8>,
     /// Rangeproof showing that the value commitment is legitimate
-    pub rangeproof: Vec<u8>,
+    pub rangeproof: RangeProof,
 }
 
 /// Parsed data from a transaction input's pegin witness
@@ -329,7 +329,7 @@ impl Transaction {
     /// Determines whether a transaction has any non-null witnesses
     pub fn has_witness(&self) -> bool {
         self.input.iter().any(|i| !i.witness.is_empty())
-            || self.output.iter().any(|o| o.has_witness())
+            || self.output.iter().any(|o| dbg!(o.has_witness()))
     }
 
     /// Get the "weight" of this transaction; roughly equivalent to BIP141, in that witness data is
@@ -344,7 +344,7 @@ impl Transaction {
     }
 
     fn get_scaled_size(&self, scale_factor: usize) -> usize {
-        let witness_flag = self.has_witness();
+        let witness_flag = dbg!(self.has_witness());
 
         let input_weight = self
             .input
@@ -387,8 +387,8 @@ impl Transaction {
                 1
                 // segwit flag byte (note this is *not* witness data in Elements)
             )
-            + input_weight
-            + output_weight
+            + dbg!(input_weight)
+            + dbg!(output_weight)
     }
 
     /// The txid of the transaction.
@@ -492,7 +492,6 @@ impl TxIn {
     }
 }
 
-// TODO: Get rid of this by introducing a dedicated type for blinded addresses.
 #[derive(Debug)]
 pub struct NoBlindingKeyInAddress;
 
@@ -515,47 +514,56 @@ impl TxOut {
         inputs: &[(
             AssetId,
             u64,
-            AssetCommitment,
+            AssetGenerator,
             AssetBlindingFactor,
             ValueBlindingFactor,
         )],
-    ) -> Result<(Self, AssetBlindingFactor, ValueBlindingFactor), NoBlindingKeyInAddress>
+    ) -> Result<(Self, AssetBlindingFactor, ValueBlindingFactor), Error>
     where
         R: RngCore + CryptoRng,
         C: Signing,
     {
         let out_abf = AssetBlindingFactor::new(rng);
-        let out_asset = AssetCommitment::new(asset, out_abf);
+        let out_asset = AssetGenerator::new(secp, asset, out_abf);
 
         let out_vbf = ValueBlindingFactor::random(rng);
-        let value_commitment = ValueCommitment::new(value, out_asset, out_vbf);
+        let value_commitment = ValueCommitment::new(secp, value, out_asset, out_vbf);
 
+        // TODO: Extract shared secret generation into function call
         let (nonce, sender_ephemeral_sk) = Nonce::new(rng, secp);
 
-        let range_proof = asset_rangeproof(
-            value,
-            address
+        let shared_secret = SharedSecret::new_with_hash(
+            &address
                 .blinding_pubkey
-                .ok_or_else(|| NoBlindingKeyInAddress)?,
-            sender_ephemeral_sk,
-            asset,
-            out_abf,
-            out_vbf,
-            value_commitment,
-            &address.script_pubkey(),
-            out_asset,
+                .ok_or(Error::NoBlindingKeyInAddress)?,
+            &sender_ephemeral_sk,
+            |pk| sha256d::Hash::hash(&pk.serialize()).into_inner().into(),
+        );
+        let sk = SecretKey::from_slice(&shared_secret.as_ref()[..32])
+            .expect("always has exactly 32 bytes");
+
+        let message = RangeProofMessage { asset, bf: out_abf };
+        let rangeproof = secp.make_rangeproof(
             1,
+            value_commitment.0,
+            value,
+            out_vbf.0,
+            &message.to_bytes(),
+            address.script_pubkey().as_bytes(),
+            sk,
             0,
             52,
-        );
+            out_asset.0,
+        )?;
 
         let inputs = inputs
             .iter()
             .copied()
-            .map(|(id, _, asset, abf, _)| (id, abf, asset))
+            .map(|(id, _, asset, abf, _)| (asset.0, id.into_tag(), abf.0))
             .collect::<Vec<_>>();
 
-        let surjection_proof = asset_surjectionproof(rng, asset, out_abf, out_asset, &inputs);
+        let surjection_proof =
+            secp.prove_surjective(rng, asset.into_tag(), out_abf.into_inner(), inputs.as_ref())?;
 
         let txout = TxOut::Confidential(ConfidentialTxOut {
             asset: out_asset,
@@ -563,8 +571,8 @@ impl TxOut {
             nonce: Some(nonce),
             script_pubkey: address.script_pubkey(),
             witness: TxOutWitness {
-                surjection_proof,
-                rangeproof: range_proof,
+                surjection_proof: surjection_proof.serialize(),
+                rangeproof,
             },
         });
 
@@ -581,12 +589,12 @@ impl TxOut {
         inputs: &[(
             AssetId,
             u64,
-            AssetCommitment,
+            AssetGenerator,
             AssetBlindingFactor,
             ValueBlindingFactor,
         )],
         outputs: &[(u64, AssetBlindingFactor, ValueBlindingFactor)],
-    ) -> Result<Self, NoBlindingKeyInAddress>
+    ) -> Result<Self, Error>
     where
         R: RngCore + CryptoRng,
         C: Signing,
@@ -594,36 +602,51 @@ impl TxOut {
         let (surjection_proof_inputs, value_blind_inputs) = inputs
             .iter()
             .copied()
-            .map(|(id, value, asset, abf, vbf)| ((id, abf, asset), (value, abf, vbf)))
+            .map(|(id, value, asset, abf, vbf)| {
+                ((asset.0, id.into_tag(), abf.0), (value, abf, vbf))
+            })
             .unzip::<_, _, Vec<_>, Vec<_>>();
 
         let out_abf = AssetBlindingFactor::new(rng);
-        let out_asset = AssetCommitment::new(asset, out_abf);
+        let out_asset = AssetGenerator::new(secp, asset, out_abf);
 
-        let out_vbf = ValueBlindingFactor::last(value, out_abf, &value_blind_inputs, &outputs);
-        let value_commitment = ValueCommitment::new(value, out_asset, out_vbf);
+        let out_vbf =
+            ValueBlindingFactor::last(secp, value, out_abf, &value_blind_inputs, &outputs);
+        let value_commitment = ValueCommitment::new(secp, value, out_asset, out_vbf);
 
+        // TODO: Extract shared secret generation into function call
         let (nonce, sender_ephemeral_sk) = Nonce::new(rng, secp);
 
-        let range_proof = asset_rangeproof(
-            value,
-            address
+        let shared_secret = SharedSecret::new_with_hash(
+            &address
                 .blinding_pubkey
-                .ok_or_else(|| NoBlindingKeyInAddress)?,
-            sender_ephemeral_sk,
-            asset,
-            out_abf,
-            out_vbf,
-            value_commitment,
-            &address.script_pubkey(),
-            out_asset,
+                .ok_or(Error::NoBlindingKeyInAddress)?,
+            &sender_ephemeral_sk,
+            |pk| sha256d::Hash::hash(&pk.serialize()).into_inner().into(),
+        );
+        let sk = SecretKey::from_slice(&shared_secret.as_ref()[..32])
+            .expect("always has exactly 32 bytes");
+
+        let message = RangeProofMessage { asset, bf: out_abf };
+        let rangeproof = secp.make_rangeproof(
             1,
+            value_commitment.0,
+            value,
+            out_vbf.0,
+            &message.to_bytes(),
+            address.script_pubkey().as_bytes(),
+            sk,
             0,
             52,
-        );
+            out_asset.0,
+        )?;
 
-        let surjection_proof =
-            asset_surjectionproof(rng, asset, out_abf, out_asset, &surjection_proof_inputs);
+        let surjection_proof = secp.prove_surjective(
+            rng,
+            asset.into_tag(),
+            out_abf.into_inner(),
+            surjection_proof_inputs.as_ref(),
+        )?;
 
         let txout = TxOut::Confidential(ConfidentialTxOut {
             asset: out_asset,
@@ -631,8 +654,8 @@ impl TxOut {
             nonce: Some(nonce),
             script_pubkey: address.script_pubkey(),
             witness: TxOutWitness {
-                surjection_proof,
-                rangeproof: range_proof,
+                surjection_proof: surjection_proof.serialize(),
+                rangeproof,
             },
         });
 
@@ -691,7 +714,7 @@ impl TxOut {
     pub fn witness_length(&self) -> usize {
         match self {
             Self::Confidential(ConfidentialTxOut { witness, .. }) => witness.encoded_length(),
-            _ => TxOutWitness::default().encoded_length(),
+            _ => TxOutWitness::empty().encoded_length(),
         }
     }
 
@@ -814,23 +837,41 @@ impl TxOut {
                 } else {
                     debug_assert!(witness.rangeproof.len() > 10);
 
-                    let has_nonzero_range = witness.rangeproof[0] & 64 == 64;
-                    let has_min = witness.rangeproof[0] & 32 == 32;
+                    let rangeproof = witness.rangeproof.serialize();
+
+                    let has_nonzero_range = rangeproof[0] & 64 == 64;
+                    let has_min = rangeproof[0] & 32 == 32;
 
                     if !has_min {
                         min_value
                     } else if has_nonzero_range {
-                        bitcoin::consensus::deserialize::<u64>(&witness.rangeproof[2..10])
+                        bitcoin::consensus::deserialize::<u64>(&rangeproof[2..10])
                             .expect("any 8 bytes is a u64")
                             .swap_bytes() // min-value is BE
                     } else {
-                        bitcoin::consensus::deserialize::<u64>(&witness.rangeproof[1..9])
+                        bitcoin::consensus::deserialize::<u64>(&rangeproof[1..9])
                             .expect("any 8 bytes is a u64")
                             .swap_bytes() // min-value is BE
                     }
                 }
             }
         }
+    }
+}
+
+struct RangeProofMessage {
+    asset: AssetId,
+    bf: AssetBlindingFactor,
+}
+
+impl RangeProofMessage {
+    fn to_bytes(&self) -> [u8; 64] {
+        let mut message = [0u8; 64];
+
+        message[..32].copy_from_slice(self.asset.into_tag().as_ref());
+        message[32..].copy_from_slice(self.bf.into_inner().as_ref());
+
+        message
     }
 }
 
@@ -1121,6 +1162,13 @@ impl Decodable for TxIn {
 impl_consensus_encoding!(TxOutWitness, surjection_proof, rangeproof);
 
 impl TxOutWitness {
+    pub fn empty() -> Self {
+        Self {
+            surjection_proof: Vec::new(),
+            rangeproof: RangeProof::from_slice(&[]).unwrap(),
+        }
+    }
+
     /// Whether this witness is null
     pub fn is_empty(&self) -> bool {
         self.surjection_proof.is_empty() && self.rangeproof.is_empty()
@@ -1261,26 +1309,42 @@ impl ConfidentialTxOut {
             + self.script_pubkey.len()
     }
 
-    pub fn unblind(&self, blinding_key: SecretKey) -> Result<UnblindedTxOut, UnblindError> {
-        let sender_ephemeral_pk = self.nonce.ok_or(UnblindError::MissingNonce)?.commitment();
-        let sender_ephemeral_pk = PublicKey::from_slice(&sender_ephemeral_pk)
-            .map_err(|_| UnblindError::InvalidPublicKey)?;
+    pub fn unblind<C: Verification>(
+        &self,
+        secp: &Secp256k1<C>,
+        blinding_key: SecretKey,
+    ) -> Result<UnblindedTxOut, UnblindError> {
+        let sender_ephemeral_pk = self.nonce.ok_or(UnblindError::MissingNonce)?.0;
 
-        let (unblinded_asset, abf, vbf, value_out) = asset_unblind(
-            sender_ephemeral_pk,
-            blinding_key,
-            &self.witness.rangeproof,
-            self.value,
-            &self.script_pubkey,
-            self.asset,
-        )
-        .map_err(|_| UnblindError::Wally)?;
+        let shared_secret =
+            SharedSecret::new_with_hash(&sender_ephemeral_pk, &blinding_key, |pk| {
+                sha256d::Hash::hash(&pk.serialize()).into_inner().into()
+            });
+        let shared_secret = SecretKey::from_slice(&shared_secret.as_ref()[..32])
+            .expect("always has exactly 32 bytes");
+
+        let (opening, _) = secp
+            .rewind_rangeproof(
+                &self.witness.rangeproof,
+                self.value.0,
+                shared_secret,
+                self.script_pubkey.as_bytes(),
+                self.asset.0,
+            )
+            .map_err(UnblindError::CannotRewindRangeProof)?;
+
+        let (asset, asset_blinding_factor) = opening.message.as_ref().split_at(32);
+        let asset = AssetId::from_slice(asset).map_err(UnblindError::MalformedAssetId)?;
+        let asset_blinding_factor = AssetBlindingFactor::from_slice(asset_blinding_factor)
+            .map_err(UnblindError::MalformedAssetBlindingFactor)?;
+
+        let value_blinding_factor = ValueBlindingFactor(opening.blinding_factor);
 
         Ok(UnblindedTxOut {
-            asset: unblinded_asset,
-            asset_blinding_factor: abf,
-            value_blinding_factor: vbf,
-            value: value_out,
+            asset,
+            value: opening.value,
+            asset_blinding_factor,
+            value_blinding_factor,
         })
     }
 }
@@ -1293,25 +1357,41 @@ pub struct UnblindedTxOut {
     pub value_blinding_factor: ValueBlindingFactor,
 }
 
+// TODO: Move some of these to secp256k1::Error
 #[derive(Debug)]
 pub enum UnblindError {
     MissingNonce,
-    InvalidPublicKey,
-    Wally,
+    CannotRewindRangeProof(secp256k1::Error),
+    MalformedAssetId(bitcoin_hashes::Error),
+    MalformedAssetBlindingFactor(secp256k1::Error),
 }
 
 impl fmt::Display for UnblindError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
             UnblindError::MissingNonce => write!(f, "no nonce in txout"),
-            UnblindError::InvalidPublicKey => write!(f, "failed to create public key from nonce"),
-            UnblindError::Wally => write!(f, "libwally error"),
+            UnblindError::CannotRewindRangeProof(_) => write!(f, "cannot rewind range proof"),
+            UnblindError::MalformedAssetId(_) => {
+                write!(f, "failed to parse asset ID from rangeproof message")
+            }
+            UnblindError::MalformedAssetBlindingFactor(_) => write!(
+                f,
+                "failed to parse asset blinding factor from rangeproof message"
+            ),
         }
     }
 }
 
-// TODO: Implement source
-impl std::error::Error for UnblindError {}
+impl std::error::Error for UnblindError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            UnblindError::MissingNonce => None,
+            UnblindError::CannotRewindRangeProof(inner) => Some(inner),
+            UnblindError::MalformedAssetId(inner) => Some(inner),
+            UnblindError::MalformedAssetBlindingFactor(inner) => Some(inner),
+        }
+    }
+}
 
 impl Encodable for TxOut {
     fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, encode::Error> {
@@ -1357,7 +1437,7 @@ impl Decodable for ConfidentialTxOut {
             value,
             nonce,
             script_pubkey: Decodable::consensus_decode(&mut d)?,
-            witness: TxOutWitness::default(),
+            witness: TxOutWitness::empty(),
         })
     }
 }
@@ -1427,11 +1507,11 @@ impl Encodable for Transaction {
             for i in &self.input {
                 ret += i.witness.consensus_encode(&mut s)?;
             }
-            let default_witness = TxOutWitness::default();
+            let empty_witness = TxOutWitness::empty();
             for witness in self.output.iter().map(|o| {
                 o.as_confidential()
                     .map(|c| &c.witness)
-                    .unwrap_or(&default_witness)
+                    .unwrap_or(&empty_witness)
             }) {
                 ret += witness.consensus_encode(&mut s)?;
             }
@@ -1494,7 +1574,7 @@ impl Decodable for Transaction {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::hashes::hex::FromHex;
+    use bitcoin::{hashes::hex::FromHex, secp256k1::PedersenCommitment};
 
     use super::*;
     use encode::serialize;
@@ -2320,15 +2400,14 @@ mod tests {
             AssetIssuance::Confidential(ConfidentialAssetIssuance {
                 asset_blinding_nonce: [0; 32],
                 asset_entropy: [0; 32],
-                amount: ValueCommitment::from_commitment(
-                    9,
-                    &[
-                        0x81, 0x65, 0x4e, 0xb5, 0xcc, 0xd9, 0x92, 0x7b, 0x8b, 0xea, 0x94, 0x99,
-                        0x7d, 0xce, 0x4a, 0xe8, 0x5b, 0x3d, 0x95, 0xa2, 0x07, 0x00, 0x38, 0x4f,
-                        0x0b, 0x8c, 0x1f, 0xe9, 0x95, 0x18, 0x06, 0x38
-                    ],
-                )
-                .unwrap(),
+                amount: ValueCommitment(
+                    PedersenCommitment::from_slice(&[
+                        0x09, 0x81, 0x65, 0x4e, 0xb5, 0xcc, 0xd9, 0x92, 0x7b, 0x8b, 0xea, 0x94,
+                        0x99, 0x7d, 0xce, 0x4a, 0xe8, 0x5b, 0x3d, 0x95, 0xa2, 0x07, 0x00, 0x38,
+                        0x4f, 0x0b, 0x8c, 0x1f, 0xe9, 0x95, 0x18, 0x06, 0x38
+                    ])
+                    .unwrap(),
+                ),
                 inflation_keys: None,
             })
         );

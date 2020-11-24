@@ -1,2 +1,5 @@
 [workspace]
 members = [ "elements-harness", "swap", "elements-fun", "elements-fun/fuzz" ]
+
+[patch.crates-io]
+secp256k1 = { git = "https://github.com/comit-network/rust-secp256k1" }

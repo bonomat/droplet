@@ -38,13 +38,12 @@ pub fn make_confidential_address() -> (Address, SecretKey, PublicKey, SecretKey,
 mod tests {
     use bitcoin::Amount;
     use elements_fun::{
-        bitcoin::{secp256k1::Message, SigHashType},
+        bitcoin::secp256k1::Message,
         bitcoin_hashes::{hash160, hex::FromHex, Hash},
         encode::serialize_hex,
         opcodes,
         script::Builder,
-        wally::tx_get_elements_signature_hash,
-        OutPoint, Transaction, TxIn, TxOut, UnblindedTxOut,
+        OutPoint, SigHash, Transaction, TxIn, TxOut, UnblindedTxOut,
     };
     use elements_harness::{
         elementd_rpc::{Client, ElementsRpc},
@@ -159,13 +158,17 @@ mod tests {
             asset_blinding_factor: abf_bitcoin,
             value_blinding_factor: vbf_bitcoin,
             value: amount_in_bitcoin,
-        } = tx_out_bitcoin.unblind(fund_blinding_sk_bitcoin).unwrap();
+        } = tx_out_bitcoin
+            .unblind(&secp, fund_blinding_sk_bitcoin)
+            .unwrap();
         let UnblindedTxOut {
             asset: unblinded_asset_id_litecoin,
             asset_blinding_factor: abf_litecoin,
             value_blinding_factor: vbf_litecoin,
             value: amount_in_litecoin,
-        } = tx_out_litecoin.unblind(fund_blinding_sk_litecoin).unwrap();
+        } = tx_out_litecoin
+            .unblind(&secp, fund_blinding_sk_litecoin)
+            .unwrap();
 
         #[allow(clippy::cast_possible_truncation)]
         let input_bitcoin = TxIn {
@@ -245,7 +248,9 @@ mod tests {
             output: vec![redeem_txout_bitcoin.clone(), txout_litecoin, fee],
         };
 
-        redeem_tx.input[0].witness.script_witness = {
+        // let mut sig_hash_cache = SigHashCache::new(&redeem_tx);
+
+        let input_0_script_witness = {
             let hash = hash160::Hash::hash(&fund_pk_bitcoin.to_bytes());
             let script = Builder::new()
                 .push_opcode(opcodes::all::OP_DUP)
@@ -255,29 +260,28 @@ mod tests {
                 .push_opcode(opcodes::all::OP_CHECKSIG)
                 .into_script();
 
-            let digest = tx_get_elements_signature_hash(
-                &redeem_tx,
-                0,
-                &script,
-                &fund_bitcoin_tx.output[fund_bitcoin_vout]
-                    .as_confidential()
-                    .unwrap()
-                    .value,
-                1,
-                true,
-            );
+            // let mut bytes = Vec::new();
+            // sig_hash_cache
+            //     .encode_signing_data_to(
+            //         &mut bytes,
+            //         0,
+            //         &script,
+            //         fund_bitcoin_amount.as_sat(),
+            //         SigHashType::All,
+            //     )
+            //     .unwrap();
 
-            let sig = secp.sign(
-                &Message::from_slice(&digest.into_inner()).unwrap(),
-                &fund_sk_bitcoin,
-            );
+            // let sig = secp.sign(
+            //     &Message::from_hashed_data::<SigHash>(&bytes),
+            //     &fund_sk_bitcoin,
+            // );
 
-            let mut serialized_signature = sig.serialize_der().to_vec();
-            serialized_signature.push(SigHashType::All as u8);
+            let mut serialized_signature = unimplemented!("sig.serialize_der().to_vec()");
+            // serialized_signature.push(SigHashType::All as u8);
 
             vec![serialized_signature, fund_pk_bitcoin.to_bytes()]
         };
-        redeem_tx.input[1].witness.script_witness = {
+        let input_1_script_witness = {
             let hash = hash160::Hash::hash(&fund_pk_litecoin.to_bytes());
             let script = Builder::new()
                 .push_opcode(opcodes::all::OP_DUP)
@@ -287,28 +291,29 @@ mod tests {
                 .push_opcode(opcodes::all::OP_CHECKSIG)
                 .into_script();
 
-            let digest = tx_get_elements_signature_hash(
-                &redeem_tx,
-                1,
-                &script,
-                &fund_litecoin_tx.output[fund_litecoin_vout]
-                    .as_confidential()
-                    .unwrap()
-                    .value,
-                1,
-                true,
-            );
+            // let mut bytes = Vec::new();
+            // sig_hash_cache
+            //     .encode_signing_data_to(
+            //         &mut bytes,
+            //         0,
+            //         &script,
+            //         fund_litecoin_amount.as_sat(),
+            //         SigHashType::All,
+            //     )
+            //     .unwrap();
 
-            let sig = secp.sign(
-                &Message::from_slice(&digest.into_inner()).unwrap(),
-                &fund_sk_litecoin,
-            );
+            // let sig = secp.sign(
+            //     &Message::from_hashed_data::<SigHash>(&bytes),
+            //     &fund_sk_litecoin,
+            // );
 
-            let mut serialized_signature = sig.serialize_der().to_vec();
-            serialized_signature.push(SigHashType::All as u8);
+            let mut serialized_signature = unimplemented!("sig.serialize_der().to_vec()");
+            // serialized_signature.push(SigHashType::All as u8);
 
             vec![serialized_signature, fund_pk_litecoin.to_bytes()]
         };
+        redeem_tx.input[0].witness.script_witness = input_0_script_witness;
+        redeem_tx.input[1].witness.script_witness = input_1_script_witness;
 
         let tx_hex = serialize_hex(&redeem_tx);
         let _redeem_txid = client.sendrawtransaction(tx_hex).await.unwrap();
@@ -341,7 +346,9 @@ mod tests {
             asset_blinding_factor: abf,
             value_blinding_factor: vbf,
             value: amount_in,
-        } = tx_out_bitcoin.unblind(redeem_blinding_sk_bitcoin).unwrap();
+        } = tx_out_bitcoin
+            .unblind(&secp, redeem_blinding_sk_bitcoin)
+            .unwrap();
 
         #[allow(clippy::cast_possible_truncation)]
         let spend_input = TxIn {
@@ -385,7 +392,9 @@ mod tests {
             output: vec![spend_output, fee],
         };
 
-        spend_tx.input[0].witness.script_witness = {
+        // let mut sig_hash_cache = SigHashCache::new(&spend_tx);
+
+        let input_0_script_witness = {
             let hash = hash160::Hash::hash(&redeem_pk_bitcoin.to_bytes());
             let script = Builder::new()
                 .push_opcode(opcodes::all::OP_DUP)
@@ -395,25 +404,29 @@ mod tests {
                 .push_opcode(opcodes::all::OP_CHECKSIG)
                 .into_script();
 
-            let digest = tx_get_elements_signature_hash(
-                &spend_tx,
-                0,
-                &script,
-                &redeem_txout_bitcoin.as_confidential().unwrap().value,
-                1,
-                true,
-            );
+            // let mut bytes = Vec::new();
+            // sig_hash_cache
+            //     .encode_signing_data_to(
+            //         &mut bytes,
+            //         0,
+            //         &script,
+            //         spend_amount_bitcoin.as_sat(),
+            //         SigHashType::All,
+            //     )
+            //     .unwrap();
 
-            let sig = secp.sign(
-                &Message::from_slice(&digest.into_inner()).unwrap(),
-                &redeem_sk_bitcoin,
-            );
+            // let sig = secp.sign(
+            //     &Message::from_hashed_data::<SigHash>(&bytes),
+            //     &redeem_sk_bitcoin,
+            // );
 
-            let mut serialized_signature = sig.serialize_der().to_vec();
-            serialized_signature.push(SigHashType::All as u8);
+            let mut serialized_signature = unimplemented!("sig.serialize_der().to_vec()");
+            // serialized_signature.push(SigHashType::All as u8);
 
             vec![serialized_signature, redeem_pk_bitcoin.to_bytes()]
         };
+
+        spend_tx.input[0].witness.script_witness = input_0_script_witness;
 
         let tx_hex = serialize_hex(&spend_tx);
         let _txid = client.sendrawtransaction(tx_hex).await.unwrap();

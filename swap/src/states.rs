@@ -1,15 +1,14 @@
 use anyhow::{Context, Result};
 use bitcoin::Amount;
 use elements_fun::{
-    bitcoin::{secp256k1::Message, SigHashType},
+    bitcoin::secp256k1::Message,
     bitcoin_hashes::{hash160, Hash},
     opcodes,
     script::Builder,
-    wally::tx_get_elements_signature_hash,
-    Address, AssetId, OutPoint, Transaction, TxIn, TxOut, UnblindedTxOut,
+    Address, AssetId, OutPoint, SigHash, Transaction, TxIn, TxOut, UnblindedTxOut,
 };
 use rand::{CryptoRng, RngCore};
-use secp256k1::{PublicKey as SecpPublicKey, SecretKey, SECP256K1};
+use secp256k1::{PublicKey as SecpPublicKey, Secp256k1, SecretKey, Verification, SECP256K1};
 
 /// Sent from Alice to Bob, assuming Alice has bitcoin.
 pub struct Message0 {
@@ -112,7 +111,7 @@ impl Alice0 {
                     .as_confidential()
                     .context("not a confidential txout")?
                     .clone()
-                    .unblind(self.blinding_sk_redeem)?;
+                    .unblind(&secp, self.blinding_sk_redeem)?;
 
                 Result::<_>::Ok((asset_id, amount))
             })
@@ -134,7 +133,7 @@ impl Alice0 {
             .as_confidential()
             .context("not a confidential txout")?
             .clone()
-            .unblind(self.input_blinding_sk)?;
+            .unblind(&secp, self.input_blinding_sk)?;
         let expected_change_amount_alice =
             Amount::from_sat(input_amount_alice) - self.redeem_amount_bob - self.fee;
         msg.transaction
@@ -150,7 +149,7 @@ impl Alice0 {
                     .as_confidential()
                     .context("not a confidential txout")?
                     .clone()
-                    .unblind(self.blinding_sk_change)?;
+                    .unblind(&secp, self.blinding_sk_change)?;
 
                 Result::<_>::Ok((asset_id, amount))
             })
@@ -165,11 +164,6 @@ impl Alice0 {
 
         // sign yourself and put signature in right spot
         let input_pk_alice = SecpPublicKey::from_secret_key(&secp, &self.input_sk);
-        let fund_amount_alice = self
-            .input_as_txout
-            .as_confidential()
-            .context("not a confidential txout")?
-            .value;
 
         let mut transaction = msg.transaction;
 
@@ -188,19 +182,24 @@ impl Alice0 {
                 .push_opcode(opcodes::all::OP_CHECKSIG)
                 .into_script();
 
-            let digest = tx_get_elements_signature_hash(
-                &transaction,
-                input_index_alice,
-                &script,
-                &fund_amount_alice,
-                1,
-                true,
-            );
+            // let mut bytes = Vec::new();
+            // SigHashCache::new(&transaction)
+            //     .encode_signing_data_to(
+            //         &mut bytes,
+            //         input_index_alice,
+            //         &script,
+            //         input_amount_alice,
+            //         SigHashType::All,
+            //     )
+            //     .context("failed to encode tx signing data")?;
 
-            let sig = secp.sign(&Message::from_slice(&digest.into_inner())?, &self.input_sk);
+            // let sig = secp.sign(
+            //     &Message::from_hashed_data::<SigHash>(&bytes),
+            //     &self.input_sk,
+            // );
 
-            let mut serialized_signature = sig.serialize_der().to_vec();
-            serialized_signature.push(SigHashType::All as u8);
+            let mut serialized_signature = unimplemented!("sig.serialize_der().to_vec()");
+            // serialized_signature.push(SigHashType::All as u8);
 
             vec![serialized_signature, input_pk_alice.serialize().to_vec()]
         };
@@ -259,9 +258,10 @@ impl Bob0 {
         }
     }
 
-    pub fn interpret<R>(self, rng: &mut R, msg: Message0) -> Result<Bob1>
+    pub fn interpret<R, C>(self, rng: &mut R, secp: &Secp256k1<C>, msg: Message0) -> Result<Bob1>
     where
         R: RngCore + CryptoRng,
+        C: Verification,
     {
         let alice_txout = msg
             .input_as_txout
@@ -279,13 +279,13 @@ impl Bob0 {
             asset_blinding_factor: abf_in_alice,
             value_blinding_factor: vbf_in_alice,
             value: amount_in_alice,
-        } = alice_txout.unblind(msg.input_blinding_sk)?;
+        } = alice_txout.unblind(secp, msg.input_blinding_sk)?;
         let UnblindedTxOut {
             asset: asset_id_bob,
             asset_blinding_factor: abf_in_bob,
             value_blinding_factor: vbf_in_bob,
             value: amount_in_bob,
-        } = bob_txout.unblind(self.input_blinding_sk)?;
+        } = bob_txout.unblind(secp, self.input_blinding_sk)?;
 
         let change_amount_alice = Amount::from_sat(amount_in_alice)
             .checked_sub(self.redeem_amount_bob)
@@ -394,7 +394,7 @@ impl Bob0 {
             transaction,
             input_index_bob,
             input_sk: self.input_sk,
-            input_as_txout_bob: self.input_as_txout,
+            amount_in_bob,
         })
     }
 }
@@ -403,7 +403,7 @@ pub struct Bob1 {
     transaction: Transaction,
     input_index_bob: usize,
     input_sk: SecretKey,
-    input_as_txout_bob: TxOut,
+    amount_in_bob: u64,
 }
 
 impl Bob1 {
@@ -411,11 +411,6 @@ impl Bob1 {
         let secp = elements_fun::bitcoin::secp256k1::Secp256k1::new();
 
         let input_pk_bob = SecpPublicKey::from_secret_key(&secp, &self.input_sk);
-        let fund_bitcoin_tx_vout_bob = self.input_as_txout_bob.clone();
-        let fund_amount_bob = fund_bitcoin_tx_vout_bob
-            .as_confidential()
-            .context("not a confidential txout")?
-            .value;
 
         let mut transaction = self.transaction.clone();
         transaction.input[self.input_index_bob]
@@ -430,22 +425,24 @@ impl Bob1 {
                 .push_opcode(opcodes::all::OP_CHECKSIG)
                 .into_script();
 
-            let digest = tx_get_elements_signature_hash(
-                &self.transaction,
-                self.input_index_bob,
-                &script,
-                &fund_amount_bob,
-                1,
-                true,
-            );
+            // let mut bytes = Vec::new();
+            // SigHashCache::new(&transaction)
+            //     .encode_signing_data_to(
+            //         &mut bytes,
+            //         self.input_index_bob,
+            //         &script,
+            //         self.amount_in_bob,
+            //         SigHashType::All,
+            //     )
+            //     .context("failed to encode tx signing data")?;
 
-            let sig = secp.sign(
-                &Message::from_slice(&digest.into_inner()).unwrap(),
-                &self.input_sk,
-            );
+            // let sig = secp.sign(
+            //     &Message::from_hashed_data::<SigHash>(&bytes),
+            //     &self.input_sk,
+            // );
 
-            let mut serialized_signature = sig.serialize_der().to_vec();
-            serialized_signature.push(SigHashType::All as u8);
+            let mut serialized_signature = unimplemented!("sig.serialize_der().to_vec()");
+            // serialized_signature.push(SigHashType::All as u8);
 
             vec![serialized_signature, input_pk_bob.serialize().to_vec()]
         };
@@ -599,7 +596,9 @@ mod tests {
         );
 
         let message0 = alice.compose();
-        let bob1 = bob.interpret(&mut thread_rng(), message0).unwrap();
+        let bob1 = bob
+            .interpret(&mut thread_rng(), SECP256K1, message0)
+            .unwrap();
         let message1 = bob1.compose().unwrap();
 
         let tx = alice.interpret(message1).unwrap();
@@ -657,7 +656,7 @@ mod tests {
             asset_blinding_factor: abf_in,
             value_blinding_factor: vbf_in,
             value: amount_in,
-        } = txout.unblind(previous_output_blinding_sk)?;
+        } = txout.unblind(SECP256K1, previous_output_blinding_sk)?;
 
         let fee = 900_000;
         let amount_out = Amount::from_sat(amount_in - fee);
@@ -704,25 +703,18 @@ mod tests {
                 .push_opcode(opcodes::all::OP_CHECKSIG)
                 .into_script();
 
-            let digest = tx_get_elements_signature_hash(
-                &tx,
-                0,
-                &script,
-                &previous_output
-                    .as_confidential()
-                    .context("not a confidential txout")?
-                    .value,
-                1,
-                true,
-            );
+            // let mut bytes = Vec::new();
+            // SigHashCache::new(&tx)
+            //     .encode_signing_data_to(&mut bytes, 0, &script, amount_in, SigHashType::All)
+            //     .context("failed to encode tx signing data")?;
 
-            let sig = SECP256K1.sign(
-                &Message::from_slice(&digest.into_inner())?,
-                &previous_output_sk,
-            );
+            // let sig = SECP256K1.sign(
+            //     &Message::from_hashed_data::<SigHash>(&bytes),
+            //     &previous_output_sk,
+            // );
 
-            let mut serialized_signature = sig.serialize_der().to_vec();
-            serialized_signature.push(SigHashType::All as u8);
+            let mut serialized_signature = unimplemented!("sig.serialize_der().to_vec()");
+            // serialized_signature.push(SigHashType::All as u8);
 
             vec![serialized_signature, previous_output_pk.to_bytes()]
         };
