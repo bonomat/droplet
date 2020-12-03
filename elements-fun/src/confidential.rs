@@ -26,6 +26,8 @@ use bitcoin::secp256k1::{
     CommitmentSecrets, Error, Generator, PedersenCommitment, PublicKey, Secp256k1, SecretKey,
     Signing,
 };
+use bitcoin_hashes::{sha256d, Hash};
+use secp256k1::ecdh::SharedSecret;
 use std::io;
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -113,11 +115,27 @@ impl Nonce {
     pub fn new<R: RngCore + CryptoRng, C: Signing>(
         rng: &mut R,
         secp: &Secp256k1<C>,
+        receiver_blinding_pk: &PublicKey,
     ) -> (Self, SecretKey) {
-        let secret_key = SecretKey::new(rng);
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let sender_sk = SecretKey::new(rng);
+        let sender_pk = PublicKey::from_secret_key(&secp, &sender_sk);
 
-        (Self(public_key), secret_key)
+        let shared_secret = Self::make_shared_secret(receiver_blinding_pk, &sender_sk);
+
+        (Self(sender_pk), shared_secret)
+    }
+
+    pub fn shared_secret(&self, receiver_blinding_sk: &SecretKey) -> SecretKey {
+        let sender_pk = self.0;
+        Self::make_shared_secret(&sender_pk, receiver_blinding_sk)
+    }
+
+    fn make_shared_secret(pk: &PublicKey, sk: &SecretKey) -> SecretKey {
+        let shared_secret = SharedSecret::new_with_hash(pk, sk, |pk| {
+            sha256d::Hash::hash(&pk.serialize()).into_inner().into()
+        });
+
+        SecretKey::from_slice(&shared_secret.as_ref()[..32]).expect("always has exactly 32 bytes")
     }
 
     pub fn encoded_length(&self) -> usize {

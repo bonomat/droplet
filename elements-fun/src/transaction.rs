@@ -529,18 +529,10 @@ impl TxOut {
         let out_vbf = ValueBlindingFactor::random(rng);
         let value_commitment = ValueCommitment::new(secp, value, out_asset, out_vbf);
 
-        // TODO: Extract shared secret generation into function call
-        let (nonce, sender_ephemeral_sk) = Nonce::new(rng, secp);
-
-        let shared_secret = SharedSecret::new_with_hash(
-            &address
-                .blinding_pubkey
-                .ok_or(Error::NoBlindingKeyInAddress)?,
-            &sender_ephemeral_sk,
-            |pk| sha256d::Hash::hash(&pk.serialize()).into_inner().into(),
-        );
-        let sk = SecretKey::from_slice(&shared_secret.as_ref()[..32])
-            .expect("always has exactly 32 bytes");
+        let receiver_blinding_pk = &address
+            .blinding_pubkey
+            .ok_or(Error::NoBlindingKeyInAddress)?;
+        let (nonce, shared_secret) = Nonce::new(rng, secp, receiver_blinding_pk);
 
         let message = RangeProofMessage { asset, bf: out_abf };
         let rangeproof = secp.make_rangeproof(
@@ -550,7 +542,7 @@ impl TxOut {
             out_vbf.0,
             &message.to_bytes(),
             address.script_pubkey().as_bytes(),
-            sk,
+            shared_secret,
             0,
             52,
             out_asset.0,
@@ -614,18 +606,10 @@ impl TxOut {
             ValueBlindingFactor::last(secp, value, out_abf, &value_blind_inputs, &outputs);
         let value_commitment = ValueCommitment::new(secp, value, out_asset, out_vbf);
 
-        // TODO: Extract shared secret generation into function call
-        let (nonce, sender_ephemeral_sk) = Nonce::new(rng, secp);
-
-        let shared_secret = SharedSecret::new_with_hash(
-            &address
-                .blinding_pubkey
-                .ok_or(Error::NoBlindingKeyInAddress)?,
-            &sender_ephemeral_sk,
-            |pk| sha256d::Hash::hash(&pk.serialize()).into_inner().into(),
-        );
-        let sk = SecretKey::from_slice(&shared_secret.as_ref()[..32])
-            .expect("always has exactly 32 bytes");
+        let receiver_blinding_pk = &address
+            .blinding_pubkey
+            .ok_or(Error::NoBlindingKeyInAddress)?;
+        let (nonce, shared_secret) = Nonce::new(rng, secp, receiver_blinding_pk);
 
         let message = RangeProofMessage { asset, bf: out_abf };
         let rangeproof = secp.make_rangeproof(
@@ -635,7 +619,7 @@ impl TxOut {
             out_vbf.0,
             &message.to_bytes(),
             address.script_pubkey().as_bytes(),
-            sk,
+            shared_secret,
             0,
             52,
             out_asset.0,
