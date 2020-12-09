@@ -68,7 +68,18 @@ jobs:
           ./fuzz.sh
 
   build_test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [ x86_64-unknown-linux-gnu, x86_64-apple-darwin ]
+        include:
+
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
@@ -79,17 +90,21 @@ jobs:
           profile: minimal
           override: true
 
+      - name: Additional libs for MacOs
+        if: matrix.os == 'macos-latest'
+        run: brew install automake autogen libtool gnu-sed
+
       - name: Cache target directory
         uses: actions/cache@v1
         with:
           path: target
-          key: target-directory-${{ hashFiles('Cargo.lock') }}-v1
+          key: ${{ matrix.target }}-target-directory-${{ hashFiles('Cargo.lock') }}-v1
 
       - name: Cache ~/.cargo/registry directory
         uses: actions/cache@v1
         with:
           path: ~/.cargo/registry
-          key: cargo-registry-directory-${{ hashFiles('Cargo.lock') }}-v1
+          key: ${{ matrix.target }}-cargo-registry-directory-${{ hashFiles('Cargo.lock') }}-v1
 
       - name: Cache node_modules directory
         uses: actions/cache@v1
@@ -97,7 +112,7 @@ jobs:
           path: |
             waves/node_modules
             ~/.config/wasm-pack-nodejs
-          key: node-modules-directory-${{ hashFiles('waves/yarn.lock') }}-v2
+          key: ${{ matrix.target }}-node-modules-directory-${{ hashFiles('waves/yarn.lock') }}-v2
 
       - name: Cargo check release code with default features
         run: cargo check --workspace --all-targets --all-features
@@ -123,7 +138,7 @@ jobs:
         uses: actions/cache@v1
         with:
           path: ~/.cargo/bin/wasm-bindgen-test-runner
-          key: ubuntu-rust-${{ env.RUST_TOOLCHAIN }}-wasm-bindgen-test-runner
+          key: ${{ matrix.target }}-ubuntu-rust-${{ env.RUST_TOOLCHAIN }}-wasm-bindgen-test-runner
 
       - name: Install wasm-bindgen-test-runner
         run: which wasm-bindgen-test-runner || cargo install wasm-bindgen-cli
