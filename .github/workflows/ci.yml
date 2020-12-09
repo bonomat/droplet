@@ -123,7 +123,18 @@ jobs:
           yarn run test
 
   wasm_wallet_test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [ x86_64-unknown-linux-gnu, x86_64-apple-darwin ]
+        include:
+
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
@@ -135,17 +146,21 @@ jobs:
           override: true
           target: wasm32-unknown-unknown
 
+      - name: Additional libs for MacOs
+        if: matrix.os == 'macos-latest'
+        run: brew install automake autogen libtool gnu-sed
+
       - name: Cache target directory
         uses: actions/cache@v1
         with:
           path: target
-          key: wasm-wallet-target-directory-${{ hashFiles('Cargo.lock') }}-v1
+          key: ${{ matrix.target }}wasm-wallet-target-directory-${{ hashFiles('Cargo.lock') }}-v1
 
       - name: Cache wasm-bindgen-test-runner
         uses: actions/cache@v1
         with:
           path: ~/.cargo/bin/wasm-bindgen-test-runner
-          key: ubuntu-rust-${{ env.RUST_TOOLCHAIN }}-wasm-bindgen-test-runner
+          key: ${{ matrix.target }}ubuntu-rust-${{ env.RUST_TOOLCHAIN }}-wasm-bindgen-test-runner
 
       - name: Install wasm-bindgen-test-runner
         run: which wasm-bindgen-test-runner || cargo install wasm-bindgen-cli
