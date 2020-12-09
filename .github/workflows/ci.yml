@@ -90,6 +90,10 @@ jobs:
           profile: minimal
           override: true
 
+      - name: Additional libs for MacOs
+        if: matrix.os == 'macos-latest'
+        run: brew install automake autogen libtool
+
       - name: Cache target directory
         uses: actions/cache@v1
         with:
