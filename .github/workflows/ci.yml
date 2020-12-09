@@ -92,7 +92,7 @@ jobs:
 
       - name: Additional libs for MacOs
         if: matrix.os == 'macos-latest'
-        run: brew install automake autogen libtool
+        run: brew install automake autogen libtool gnu-sed
 
       - name: Cache target directory
         uses: actions/cache@v1
