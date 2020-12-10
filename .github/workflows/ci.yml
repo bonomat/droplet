@@ -148,7 +148,7 @@ jobs:
 
       - name: Additional libs for MacOs
         if: matrix.os == 'macos-latest'
-        run: brew install automake autogen libtool gnu-sed
+        run: brew install automake autogen libtool gnu-sed gcc
 
       - name: Cache target directory
         uses: actions/cache@v1
@@ -166,6 +166,7 @@ jobs:
         run: which wasm-bindgen-test-runner || cargo install wasm-bindgen-cli
 
       - name: Waves wallet tests
+        if: matrix.os == 'macos-latest'
         run: |
           cd waves/wallet
-          cargo test --target wasm32-unknown-unknown
+          CC=gcc-10 cargo test --target wasm32-unknown-unknown
