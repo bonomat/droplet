@@ -67,7 +67,7 @@ jobs:
           cd ./elements-fun/fuzz
           ./fuzz.sh
 
-  build_test:
+  build_test_workspace:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -85,11 +85,27 @@ jobs:
           path: target
           key: target-directory-${{ hashFiles('Cargo.lock') }}-v1
 
-      - name: Cache ~/.cargo/registry directory
+      - name: Cargo test
+        run: cargo test --workspace --all-features
+
+  waves_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          override: true
+          target: wasm32-unknown-unknown
+
+      - name: Cache target directory
         uses: actions/cache@v1
         with:
-          path: ~/.cargo/registry
-          key: cargo-registry-directory-${{ hashFiles('Cargo.lock') }}-v1
+          path: target
+          key: wasm-wallet-target-directory-${{ hashFiles('Cargo.lock') }}-v1
 
       - name: Cache node_modules directory
         uses: actions/cache@v1
@@ -99,12 +115,6 @@ jobs:
             ~/.config/wasm-pack-nodejs
           key: node-modules-directory-${{ hashFiles('waves/yarn.lock') }}-v2
 
-      - name: Cargo check release code with default features
-        run: cargo check --workspace --all-targets --all-features
-
-      - name: Cargo test
-        run: cargo test --workspace --all-features
-
       - name: React tests
         run: |
           cd waves
@@ -112,23 +122,51 @@ jobs:
           yarn run build
           yarn run test
 
-      - name: Install wasm target
+  wasm_wallet_test:
+    strategy:
+      matrix:
+        target: [ x86_64-unknown-linux-gnu, x86_64-apple-darwin ]
+        include:
+
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+
+      - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           override: true
           target: wasm32-unknown-unknown
 
+      - name: Additional libs for MacOs
+        if: matrix.os == 'macos-latest'
+        run: brew install automake autogen libtool gnu-sed gcc
+
+      - name: Cache target directory
+        uses: actions/cache@v1
+        with:
+          path: target
+          key: ${{ matrix.target }}wasm-wallet-target-directory-${{ hashFiles('Cargo.lock') }}-v1
+
       - name: Cache wasm-bindgen-test-runner
         uses: actions/cache@v1
         with:
           path: ~/.cargo/bin/wasm-bindgen-test-runner
-          key: ubuntu-rust-${{ env.RUST_TOOLCHAIN }}-wasm-bindgen-test-runner
+          key: ${{ matrix.target }}ubuntu-rust-${{ env.RUST_TOOLCHAIN }}-wasm-bindgen-test-runner
 
       - name: Install wasm-bindgen-test-runner
         run: which wasm-bindgen-test-runner || cargo install wasm-bindgen-cli
 
       - name: Waves wallet tests
+        if: matrix.os == 'macos-latest'
         run: |
-          cd waves/src/wallet
-          cargo test --target wasm32-unknown-unknown
+          cd waves/wallet
+          CC=gcc-10 cargo test --target wasm32-unknown-unknown
