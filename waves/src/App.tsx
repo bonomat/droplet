@@ -241,6 +241,7 @@ function App() {
             size="sm"
             variant="connect_wallet_button"
             isLoading={isLoading}
+            data-cy="wallet-create"
         >
             Create wallet
         </Button>;
@@ -250,6 +251,7 @@ function App() {
             size="sm"
             variant="connect_wallet_button"
             isLoading={isLoading}
+            data-cy="wallet-unlock"
         >
             Unlock wallet
         </Button>;
@@ -315,6 +317,7 @@ function App() {
                                     variant="main_button"
                                     isLoading={isCreatingNewSwap}
                                     disabled={isSwapButtonDisabled}
+                                    data-cy="swap-button"
                                 >
                                     Swap
                                 </Button>
