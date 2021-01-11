@@ -36,6 +36,40 @@ jobs:
       - name: Run clippy with all features
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  ui_e2e_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+
+      - name: Set up environment and build binaries
+        run: |
+          cd waves
+          ./e2e_test_setup.sh
+
+      - name: Run test
+        run: |
+          cd waves
+          yarn run cypress run
+
+      - name: Extract docker logs
+        if: failure()
+        run: |
+          - docker logs liquid-e2e-test > liquid.log
+          - docker logs electrs-liquid > electrs.log
+          - docker logs esplora-liquid > esplora.log
+
+      - name: Archive logs
+        uses: actions/upload-artifact@v2
+        if: failure()
+        with:
+          name: Logfiles
+          path: |
+            ./waves/bobtimus.log
+            ./liquid.log
+            ./electrs.log
+            ./esplora.log
+
   fuzz:
     runs-on: ubuntu-latest
     steps:
