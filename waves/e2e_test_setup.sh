@@ -4,8 +4,6 @@ docker-compose up -d
 
 sleep 5
 
-docker ps -a
-
 native_asset_id=$(docker exec liquid-e2e-test elements-cli -rpcport=18884 -rpcuser=admin1 -rpcpassword=123 dumpassetlabels | jq -r '.bitcoin')
 echo "Native Asset ID: "$native_asset_id
 
