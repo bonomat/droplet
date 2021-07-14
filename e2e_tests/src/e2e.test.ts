@@ -26,7 +26,7 @@ describe("webdriver", () => {
 
     beforeAll(async () => {
         const service = new firefox.ServiceBuilder(firefoxPath);
-        const options = new firefox.Options();
+        const options = new firefox.Options().headless();
 
         driver = new Builder()
             .setFirefoxService(service)
