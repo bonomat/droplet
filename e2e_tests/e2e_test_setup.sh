@@ -1,6 +1,8 @@
 set -e
 
-# This script is for CI purposes only. If you want to run the e2e tests locally make sure to setup your environment accordingly
+# This script is for CI purposes only. If you want to run the e2e tests locally make sure to setup your environment accordingly using:
+#          curl https://travis.nigiri.network | bash
+#          docker-compose -f ./docker-compose.yml up -d
 
 btc_asset_id=$(docker exec nigiri_liquid_1 elements-cli -rpcport=18884 -rpcuser=admin1 -rpcpassword=123 dumpassetlabels | jq -r '.bitcoin')
 

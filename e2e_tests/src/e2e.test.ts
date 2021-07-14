@@ -11,11 +11,6 @@ const getElementById = async (driver, xpath, timeout = 4000) => {
     return await driver.wait(until.elementIsVisible(el), timeout);
 };
 
-const getElementByClass = async (driver, className, timeout = 4000) => {
-    const el = await driver.wait(until.elementLocated(By.className(className)), timeout);
-    return await driver.wait(until.elementIsVisible(el), timeout);
-};
-
 describe("webdriver", () => {
     const webAppUrl = "http://localhost:3030";
 
